@@ -14,6 +14,8 @@ type Config struct {
 	JWT      JWTConfig
 	Worker   WorkerConfig
 	PDF      PDFConfig
+	Rate     RateConfig
+	SSE      SSEConfig
 }
 
 type ServerConfig struct {
@@ -36,10 +38,12 @@ type DBConfig struct {
 }
 
 type RabbitMQConfig struct {
-	URL       string
-	QueueName string
-	DLQName   string
-	Exchange  string
+	URL           string
+	JobExchange   string
+	JobQueue      string
+	JobDLQ        string
+	EventExchange string
+	Prefetch      int
 }
 
 type JWTConfig struct {
@@ -56,6 +60,16 @@ type WorkerConfig struct {
 
 type PDFConfig struct {
 	OutPutDir string
+}
+
+type RateConfig struct {
+	RPS   float64
+	Burst int
+}
+
+type SSEConfig struct {
+	MaxConnections int
+	ClientBuffer   int
 }
 
 func Load() (*Config, error) {
@@ -79,10 +93,12 @@ func Load() (*Config, error) {
 			MinConns: int32(getIntEnv("DB_MIN_CONNS", 2)),
 		},
 		RabbitMQ: RabbitMQConfig{
-			URL:       getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
-			QueueName: getEnv("RABBITMQ_QUEUE", "pdf_jobs"),
-			DLQName:   getEnv("RABBITMQ_DLQ", "pdf_jobs_dlq"),
-			Exchange:  getEnv("RABBITMQ_EXCHANGE", "pdf_exchange"),
+			URL:           getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+			JobExchange:   getEnv("RABBITMQ_JOB_EXCHANGE", "pdf_jobs_exchange"),
+			JobQueue:      getEnv("RABBITMQ_JOB_QUEUE", "pdf_jobs"),
+			JobDLQ:        getEnv("RABBITMQ_JOB_DLQ", "pdf_jobs_dlq"),
+			EventExchange: getEnv("RABBITMQ_EVENT_EXCHANGE", "job_events"),
+			Prefetch:      getIntEnv("RABBITMQ_PREFETCH", 10),
 		},
 		JWT: JWTConfig{
 			AccessTokenSecret:  getEnv("JWT_ACCESS_SECRET", ""),
@@ -96,6 +112,15 @@ func Load() (*Config, error) {
 		},
 		PDF: PDFConfig{
 			OutPutDir: getEnv("PDF_OUTPUT_DIR", "./output"),
+		},
+
+		Rate: RateConfig{
+			RPS:   getFloatEnv("RATE_LIMIT_RPS", 20),
+			Burst: getIntEnv("RATE_LIMIT_BURST", 40),
+		},
+		SSE: SSEConfig{
+			MaxConnections: getIntEnv("SSE_MAX_CONNECTIONS", 10000),
+			ClientBuffer:   getIntEnv("SSE_CLIENT_BUFFER", 16),
 		},
 	}
 
@@ -136,6 +161,15 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func getFloatEnv(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback

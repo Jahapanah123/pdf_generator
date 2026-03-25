@@ -12,6 +12,7 @@ var (
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")
 	ErrTokenExpired      = errors.New("token expired")
 	ErrTokenInvalid      = errors.New("token invalid")
+	ErrSSEMaxConnections = errors.New("max SSE connections reached")
 )
 
 type ValidationError struct {

@@ -9,7 +9,7 @@ type JobStatus string
 
 const (
 	JobStatusPending    JobStatus = "pending"
-	JobStatusInProgress JobStatus = "in_progress"
+	JobStatusProcessing JobStatus = "processing"
 	JobStatusCompleted  JobStatus = "completed"
 	JobStatusFailed     JobStatus = "failed"
 )
@@ -30,7 +30,7 @@ type Job struct {
 }
 
 type CreateJobRequest struct {
-	TemplateName string          `json:"template_name" validate:"required"`
+	TemplateName string          `json:"template_name" validate:"required,min=1,max=255"`
 	Payload      json.RawMessage `json:"payload" validate:"required"`
 }
 
@@ -42,6 +42,7 @@ type JobResponse struct {
 
 type JobStatusResponse struct {
 	ID           string     `json:"id"`
+	UserID       string     `json:"user_id"`
 	Status       JobStatus  `json:"status"`
 	FilePath     *string    `json:"file_path,omitempty"`
 	ErrorMessage *string    `json:"error_message,omitempty"`
@@ -49,6 +50,7 @@ type JobStatusResponse struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
+// JobMessage is the payload sent to job_queue for workers to consume
 type JobMessage struct {
 	JobID        string          `json:"job_id"`
 	UserID       string          `json:"user_id"`
@@ -56,4 +58,14 @@ type JobMessage struct {
 	Payload      json.RawMessage `json:"payload"`
 	RetryCount   int             `json:"retry_count"`
 	MaxRetries   int             `json:"max_retries"`
+}
+
+// JobEvent is published to fanout exchange when job status changes
+type JobEvent struct {
+	JobID        string    `json:"job_id"`
+	UserID       string    `json:"user_id"`
+	Status       JobStatus `json:"status"`
+	FilePath     *string   `json:"file_path,omitempty"`
+	ErrorMessage *string   `json:"error_message,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
 }
