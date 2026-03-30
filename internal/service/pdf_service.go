@@ -157,7 +157,7 @@ func (s *pdfService) ListJobs(ctx context.Context, userID string, limit, offset 
 	return responses, nil
 }
 
-// --- validation error ---
+// validation error
 
 type validationErr struct {
 	errors []domain.ValidationError
