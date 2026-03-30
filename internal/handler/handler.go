@@ -3,9 +3,9 @@ package handler
 import (
 	"log/slog"
 
-	"github.com/jahapahanh123/pdf_generator/internal/SSE"
 	jwtpkg "github.com/jahapanah123/pdf_generator/internal/pkg/jwt"
 	"github.com/jahapanah123/pdf_generator/internal/service"
+	"github.com/jahapanah123/pdf_generator/internal/sse"
 )
 
 type Handlers struct {
@@ -17,7 +17,7 @@ type Handlers struct {
 
 func NewHandlers(
 	pdfService service.PDFService,
-	broker *SSE.Broker,
+	broker *sse.Broker,
 	jwtManager *jwtpkg.Manager,
 	logger *slog.Logger,
 ) *Handlers {
