@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -105,21 +106,54 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 			slog.Duration("duration", time.Since(start)),
 		)
 
-		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
+		// Always ack the current message (we'll republish with updated count if retrying)
+		_ = msg.Ack(false)
 
-		if jobMsg.RetryCount < jobMsg.MaxRetries-1 {
-			p.logger.Info("requeuing",
+		// Get actual retry count from DB (source of truth)
+		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
+		job, dbErr := p.repo.GetByID(ctx, jobMsg.JobID)
+		if dbErr != nil {
+			p.logger.Error("fetch job for retry check failed",
 				slog.String("job_id", jobMsg.JobID),
-				slog.Int("retry", jobMsg.RetryCount+1),
+				slog.Any("error", dbErr),
 			)
-			_ = msg.Nack(false, true) // requeue
+			return
+		}
+
+		if job.RetryCount < job.MaxRetries {
+			// Republish with updated retry count
+			jobMsg.RetryCount = job.RetryCount
+			retryBody, marshalErr := json.Marshal(jobMsg)
+			if marshalErr != nil {
+				p.logger.Error("marshal retry message failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", marshalErr),
+				)
+				return
+			}
+
+			if pubErr := p.rmq.PublishJob(ctx, retryBody); pubErr != nil {
+				p.logger.Error("republish retry failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", pubErr),
+				)
+				errMsg := "retry publish failed: " + pubErr.Error()
+				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+				return
+			}
+
+			p.logger.Info("job requeued with updated retry count",
+				slog.String("job_id", jobMsg.JobID),
+				slog.Int("retry", job.RetryCount),
+				slog.Int("max_retries", job.MaxRetries),
+			)
 		} else {
-			p.logger.Warn("max retries, sending to DLQ",
+			// Max retries exceeded
+			p.logger.Warn("max retries exceeded, marking failed",
 				slog.String("job_id", jobMsg.JobID),
 			)
 			errMsg := "max retries exceeded: " + err.Error()
 			_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
-			_ = msg.Nack(false, false) // DLQ
 		}
 		return
 	}
