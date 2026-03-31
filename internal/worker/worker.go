@@ -98,7 +98,8 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 			slog.Int("worker_id", workerID),
 			slog.Any("error", err),
 		)
-		_ = msg.Nack(false, false) // malformed → DLQ
+		// Malformed message — nack without requeue, DLX sends to DLQ
+		_ = msg.Nack(false, false)
 		return
 	}
 
@@ -111,19 +112,16 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 			slog.Duration("duration", time.Since(start)),
 		)
 
-		// Ack the current message — we handle retry via separate retry queues
+		// Ack current message — we handle retry/DLQ manually
 		_ = msg.Ack(false)
 
-		// Increment retry in DB (source of truth)
+		// Increment retry in DB
 		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
 
 		nextRetry := jobMsg.RetryCount + 1
 
 		if nextRetry <= p.maxRetries {
-			// Route to the correct retry queue (1, 2, or 3)
-			// Retry 1 → retry_queue_1 (1s delay)
-			// Retry 2 → retry_queue_2 (5s delay)
-			// Retry 3 → retry_queue_3 (10s delay)
+			// Send to delayed retry queue
 			jobMsg.RetryCount = nextRetry
 			retryBody, marshalErr := json.Marshal(jobMsg)
 			if marshalErr != nil {
@@ -153,13 +151,31 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 				slog.String("retry_queue", p.rmq.RetryQueueName(nextRetry)),
 			)
 		} else {
-			// All retries exhausted → mark failed
-			p.logger.Warn("all retries exhausted",
-				slog.String("job_id", jobMsg.JobID),
-				slog.Int("total_attempts", nextRetry),
-			)
+			// All retries exhausted — send to DLQ explicitly + mark failed in DB
 			errMsg := "all retries exhausted: " + err.Error()
 			_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+
+			// Publish to DLQ so the message is preserved for inspection
+			dlqBody, marshalErr := json.Marshal(jobMsg)
+			if marshalErr != nil {
+				p.logger.Error("marshal DLQ message failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", marshalErr),
+				)
+				return
+			}
+
+			if dlqErr := p.rmq.PublishToDLQ(ctx, dlqBody); dlqErr != nil {
+				p.logger.Error("publish to DLQ failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", dlqErr),
+				)
+			} else {
+				p.logger.Warn("job sent to DLQ",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Int("total_attempts", nextRetry),
+				)
+			}
 		}
 		return
 	}

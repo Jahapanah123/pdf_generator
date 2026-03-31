@@ -372,3 +372,25 @@ func (r *RabbitMQ) Close() error {
 	}
 	return nil
 }
+
+// PublishToDLQ sends a failed message directly to the dead letter queue
+func (r *RabbitMQ) PublishToDLQ(ctx context.Context, body []byte) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return r.ch.PublishWithContext(
+		pubCtx,
+		r.cfg.JobExchange,
+		r.cfg.JobDLQ,
+		false, false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Body:         body,
+			Timestamp:    time.Now(),
+		},
+	)
+}
