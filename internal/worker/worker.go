@@ -20,6 +20,7 @@ type Pool struct {
 	logger      *slog.Logger
 	concurrency int
 	prefetch    int
+	maxRetries  int
 	wg          sync.WaitGroup
 }
 
@@ -30,6 +31,7 @@ func NewPool(
 	logger *slog.Logger,
 	concurrency int,
 	prefetch int,
+	maxRetries int,
 ) *Pool {
 	return &Pool{
 		rmq:         rmq,
@@ -38,6 +40,7 @@ func NewPool(
 		logger:      logger,
 		concurrency: concurrency,
 		prefetch:    prefetch,
+		maxRetries:  maxRetries,
 	}
 }
 
@@ -50,6 +53,7 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.logger.Info("worker pool starting",
 		slog.Int("concurrency", p.concurrency),
 		slog.Int("prefetch", p.prefetch),
+		slog.Int("max_retries", p.maxRetries),
 	)
 
 	for i := 0; i < p.concurrency; i++ {
@@ -102,62 +106,65 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 		p.logger.Error("process failed",
 			slog.Int("worker_id", workerID),
 			slog.String("job_id", jobMsg.JobID),
+			slog.Int("retry_count", jobMsg.RetryCount),
 			slog.Any("error", err),
 			slog.Duration("duration", time.Since(start)),
 		)
 
-		// Always ack the current message (we'll republish with updated count if retrying)
+		// Ack the current message — we handle retry via separate retry queues
 		_ = msg.Ack(false)
 
-		// Get actual retry count from DB (source of truth)
+		// Increment retry in DB (source of truth)
 		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
-		job, dbErr := p.repo.GetByID(ctx, jobMsg.JobID)
-		if dbErr != nil {
-			p.logger.Error("fetch job for retry check failed",
-				slog.String("job_id", jobMsg.JobID),
-				slog.Any("error", dbErr),
-			)
-			return
-		}
 
-		if job.RetryCount < job.MaxRetries {
-			// Republish with updated retry count
-			jobMsg.RetryCount = job.RetryCount
+		nextRetry := jobMsg.RetryCount + 1
+
+		if nextRetry <= p.maxRetries {
+			// Route to the correct retry queue (1, 2, or 3)
+			// Retry 1 → retry_queue_1 (1s delay)
+			// Retry 2 → retry_queue_2 (5s delay)
+			// Retry 3 → retry_queue_3 (10s delay)
+			jobMsg.RetryCount = nextRetry
 			retryBody, marshalErr := json.Marshal(jobMsg)
 			if marshalErr != nil {
 				p.logger.Error("marshal retry message failed",
 					slog.String("job_id", jobMsg.JobID),
 					slog.Any("error", marshalErr),
 				)
-				return
-			}
-
-			if pubErr := p.rmq.PublishJob(ctx, retryBody); pubErr != nil {
-				p.logger.Error("republish retry failed",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Any("error", pubErr),
-				)
-				errMsg := "retry publish failed: " + pubErr.Error()
+				errMsg := "failed to marshal retry message"
 				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
 				return
 			}
 
-			p.logger.Info("job requeued with updated retry count",
+			if pubErr := p.rmq.PublishToRetry(ctx, nextRetry, retryBody); pubErr != nil {
+				p.logger.Error("publish to retry queue failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Int("retry_level", nextRetry),
+					slog.Any("error", pubErr),
+				)
+				errMsg := "failed to publish to retry queue: " + pubErr.Error()
+				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+				return
+			}
+
+			p.logger.Info("job sent to retry queue",
 				slog.String("job_id", jobMsg.JobID),
-				slog.Int("retry", job.RetryCount),
-				slog.Int("max_retries", job.MaxRetries),
+				slog.Int("retry_level", nextRetry),
+				slog.String("retry_queue", p.rmq.RetryQueueName(nextRetry)),
 			)
 		} else {
-			// Max retries exceeded
-			p.logger.Warn("max retries exceeded, marking failed",
+			// All retries exhausted → mark failed
+			p.logger.Warn("all retries exhausted",
 				slog.String("job_id", jobMsg.JobID),
+				slog.Int("total_attempts", nextRetry),
 			)
-			errMsg := "max retries exceeded: " + err.Error()
+			errMsg := "all retries exhausted: " + err.Error()
 			_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
 		}
 		return
 	}
 
+	// Success
 	if err := msg.Ack(false); err != nil {
 		p.logger.Error("ack failed",
 			slog.String("job_id", jobMsg.JobID),
