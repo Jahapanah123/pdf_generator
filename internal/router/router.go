@@ -54,6 +54,7 @@ func Setup(
 		api.POST("/jobs", handlers.PDF.CreateJob)
 		api.GET("/jobs", handlers.PDF.ListJobs)
 		api.GET("/jobs/:id", handlers.PDF.GetJobStatus)
+		api.GET("/jobs/:id/download", handlers.PDF.DownloadJob)
 		api.GET("/jobs/stream", handlers.SSE.Stream)
 	}
 

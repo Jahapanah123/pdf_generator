@@ -58,6 +58,32 @@ func (h *PDFHandler) GetJobStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+func (h *PDFHandler) DownloadJob(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	jobID := c.Param("id")
+
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest,
+			domain.NewAPIError(http.StatusBadRequest, "job id is required"))
+		return
+	}
+
+	job, err := h.svc.GetJobStatus(c.Request.Context(), userID.(string), jobID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	if job.Status != domain.JobStatusCompleted || job.FilePath == nil {
+		c.JSON(http.StatusNotFound,
+			domain.NewAPIError(http.StatusNotFound, "file not found or job not completed"))
+		return
+	}
+
+	c.Header("Content-Disposition", "attachment; filename=document.pdf")
+	c.File(*job.FilePath)
+}
+
 func (h *PDFHandler) ListJobs(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
