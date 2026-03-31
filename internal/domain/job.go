@@ -69,4 +69,3 @@ type JobEvent struct {
 	ErrorMessage *string   `json:"error_message,omitempty"`
 	Timestamp    time.Time `json:"timestamp"`
 }
-
