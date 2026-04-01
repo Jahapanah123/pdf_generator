@@ -97,8 +97,8 @@ func Load() (*Config, error) {
 			Password: getEnv("DB_PASSWORD", "password"),
 			DBName:   getEnv("DB_NAME", "pdf_service"),
 			SSLMode:  getEnv("DB_SSL_MODE", "disable"),
-			MaxConns: int32(getIntEnv("DB_MAX_CONNS", 10)),
-			MinConns: int32(getIntEnv("DB_MIN_CONNS", 2)),
+			MaxConns: int32(getIntEnv("DB_MAX_CONNS", 20)),
+			MinConns: int32(getIntEnv("DB_MIN_CONNS", 5)),
 		},
 		RabbitMQ: RabbitMQConfig{
 			URL:           getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
@@ -106,7 +106,7 @@ func Load() (*Config, error) {
 			JobQueue:      getEnv("RABBITMQ_JOB_QUEUE", "pdf_jobs"),
 			JobDLQ:        getEnv("RABBITMQ_JOB_DLQ", "pdf_jobs_dlq"),
 			EventExchange: getEnv("RABBITMQ_EVENT_EXCHANGE", "job_events"),
-			Prefetch:      getIntEnv("RABBITMQ_PREFETCH", 10),
+			Prefetch:      getIntEnv("RABBITMQ_PREFETCH", 1),
 		},
 		JWT: JWTConfig{
 			AccessTokenSecret:  getEnv("JWT_ACCESS_SECRET", ""),
