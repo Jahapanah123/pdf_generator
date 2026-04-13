@@ -142,14 +142,14 @@ func nextBackoff(current time.Duration) time.Duration {
 }
 
 func (r *RabbitMQ) setup() error {
-	// 1. Job direct exchange
+	//  Job direct exchange
 	if err := r.ch.ExchangeDeclare(
 		r.cfg.JobExchange, "direct", true, false, false, false, nil,
 	); err != nil {
 		return fmt.Errorf("declare job exchange: %w", err)
 	}
 
-	// 2. Final DLQ
+	// DLQ (messages that exhausted all retries)
 	if _, err := r.ch.QueueDeclare(
 		r.cfg.JobDLQ, true, false, false, false, nil,
 	); err != nil {
@@ -161,14 +161,14 @@ func (r *RabbitMQ) setup() error {
 		return fmt.Errorf("bind DLQ: %w", err)
 	}
 
-	// 3. Retry queues with TTL + DLX back to main queue
+	// Retry queues (retry_1 → main → retry_2 → main → retry_3 → main → usk bad DLQ)
 	retryQueues := []struct {
 		Name string
 		TTL  int
 	}{
-		{Name: r.retryQueueName(1), TTL: 1000},
-		{Name: r.retryQueueName(2), TTL: 5000},
-		{Name: r.retryQueueName(3), TTL: 10000},
+		{Name: r.retryQueueName(1), TTL: 1000},  // 1 second
+		{Name: r.retryQueueName(2), TTL: 5000},  // 5 seconds
+		{Name: r.retryQueueName(3), TTL: 10000}, // 10 seconds
 	}
 
 	for _, rq := range retryQueues {
@@ -176,7 +176,7 @@ func (r *RabbitMQ) setup() error {
 			rq.Name, true, false, false, false,
 			amqp.Table{
 				"x-dead-letter-exchange":    r.cfg.JobExchange,
-				"x-dead-letter-routing-key": r.cfg.JobQueue,
+				"x-dead-letter-routing-key": r.cfg.JobQueue, // Expired messages go back to main queue
 				"x-message-ttl":             int64(rq.TTL),
 			},
 		); err != nil {
@@ -189,12 +189,12 @@ func (r *RabbitMQ) setup() error {
 		}
 	}
 
-	// 4. Main job queue
+	//  Main job queue - dead letters go to retry_queue_1 first
 	if _, err := r.ch.QueueDeclare(
 		r.cfg.JobQueue, true, false, false, false,
 		amqp.Table{
 			"x-dead-letter-exchange":    r.cfg.JobExchange,
-			"x-dead-letter-routing-key": r.cfg.JobDLQ,
+			"x-dead-letter-routing-key": r.retryQueueName(1), // First retry
 		},
 	); err != nil {
 		return fmt.Errorf("declare job queue: %w", err)
@@ -205,7 +205,7 @@ func (r *RabbitMQ) setup() error {
 		return fmt.Errorf("bind job queue: %w", err)
 	}
 
-	// 5. Fanout exchange for events
+	//  Fanout exchange for job completion events
 	if err := r.ch.ExchangeDeclare(
 		r.cfg.EventExchange, "fanout", true, false, false, false, nil,
 	); err != nil {

@@ -2,7 +2,7 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -92,95 +92,68 @@ func (p *Pool) worker(ctx context.Context, id int, msgs <-chan amqp.Delivery) {
 func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delivery) {
 	start := time.Now()
 
+	// Parse message
 	jobMsg, err := p.processor.ParseMessage(msg.Body)
 	if err != nil {
-		p.logger.Error("parse message failed",
+		p.logger.Error("parse message failed - sending to DLQ",
 			slog.Int("worker_id", workerID),
 			slog.Any("error", err),
 		)
-		// Malformed message — nack without requeue, DLX sends to DLQ
+		// Malformed message → Nack without requeue → goes to DLQ
 		_ = msg.Nack(false, false)
 		return
 	}
 
+	// Get current retry count from message headers
+	retryCount := getRetryCount(msg)
+
+	p.logger.Info("processing job",
+		slog.Int("worker_id", workerID),
+		slog.String("job_id", jobMsg.JobID),
+		slog.String("template", jobMsg.TemplateName),
+		slog.Int("retry_attempt", retryCount),
+	)
+
+	// Process the job
 	if err := p.processor.Process(ctx, jobMsg); err != nil {
-		p.logger.Error("process failed",
+		p.logger.Error("job processing failed",
 			slog.Int("worker_id", workerID),
 			slog.String("job_id", jobMsg.JobID),
-			slog.Int("retry_count", jobMsg.RetryCount),
+			slog.Int("retry_attempt", retryCount),
 			slog.Any("error", err),
 			slog.Duration("duration", time.Since(start)),
 		)
 
-		// Ack current message — we handle retry/DLQ manually
-		_ = msg.Ack(false)
-
-		// Increment retry in DB
-		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
-
-		nextRetry := jobMsg.RetryCount + 1
-
-		if nextRetry <= p.maxRetries {
-			// Send to delayed retry queue
-			jobMsg.RetryCount = nextRetry
-			retryBody, marshalErr := json.Marshal(jobMsg)
-			if marshalErr != nil {
-				p.logger.Error("marshal retry message failed",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Any("error", marshalErr),
-				)
-				errMsg := "failed to marshal retry message"
-				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
-				return
-			}
-
-			if pubErr := p.rmq.PublishToRetry(ctx, nextRetry, retryBody); pubErr != nil {
-				p.logger.Error("publish to retry queue failed",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Int("retry_level", nextRetry),
-					slog.Any("error", pubErr),
-				)
-				errMsg := "failed to publish to retry queue: " + pubErr.Error()
-				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
-				return
-			}
-
-			p.logger.Info("job sent to retry queue",
+		// Check if we should retry
+		if retryCount < p.maxRetries {
+			p.logger.Info("job will be retried via DLX",
 				slog.String("job_id", jobMsg.JobID),
-				slog.Int("retry_level", nextRetry),
-				slog.String("retry_queue", p.rmq.RetryQueueName(nextRetry)),
+				slog.Int("retry_attempt", retryCount),
+				slog.Int("max_retries", p.maxRetries),
 			)
+
+			// Nack with requeue=false
+			// RabbitMQ will route this to retry queue via DLX
+			// After TTL expires, it comes back to main queue with x-death header incremented
+			_ = msg.Nack(false, false)
 		} else {
-			// All retries exhausted — send to DLQ explicitly + mark failed in DB
-			errMsg := "all retries exhausted: " + err.Error()
+			// Max retries exceeded
+			p.logger.Warn("max retries exceeded - job failed permanently",
+				slog.String("job_id", jobMsg.JobID),
+				slog.Int("total_attempts", retryCount+1),
+			)
+
+			// Update DB status to failed
+			errMsg := fmt.Sprintf("max retries (%d) exceeded: %v", p.maxRetries, err)
 			_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
 
-			// Publish to DLQ so the message is preserved for inspection
-			dlqBody, marshalErr := json.Marshal(jobMsg)
-			if marshalErr != nil {
-				p.logger.Error("marshal DLQ message failed",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Any("error", marshalErr),
-				)
-				return
-			}
-
-			if dlqErr := p.rmq.PublishToDLQ(ctx, dlqBody); dlqErr != nil {
-				p.logger.Error("publish to DLQ failed",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Any("error", dlqErr),
-				)
-			} else {
-				p.logger.Warn("job sent to DLQ",
-					slog.String("job_id", jobMsg.JobID),
-					slog.Int("total_attempts", nextRetry),
-				)
-			}
+			// Ack to remove from queue (don't send to DLQ as we've handled it)
+			_ = msg.Ack(false)
 		}
 		return
 	}
 
-	// Success
+	// Success - acknowledge
 	if err := msg.Ack(false); err != nil {
 		p.logger.Error("ack failed",
 			slog.String("job_id", jobMsg.JobID),
@@ -188,9 +161,37 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 		)
 	}
 
-	p.logger.Info("job done",
+	p.logger.Info("job completed successfully",
 		slog.Int("worker_id", workerID),
 		slog.String("job_id", jobMsg.JobID),
 		slog.Duration("duration", time.Since(start)),
 	)
+}
+
+// getRetryCount extracts retry count from RabbitMQ's x-death header
+// RabbitMQ automatically tracks how many times a message has been dead-lettered
+func getRetryCount(msg amqp.Delivery) int {
+	if msg.Headers == nil {
+		return 0
+	}
+
+	// x-death is an array of death records
+	deaths, ok := msg.Headers["x-death"].([]interface{})
+	if !ok || len(deaths) == 0 {
+		return 0
+	}
+
+	// Get the first death record (most recent)
+	death, ok := deaths[0].(amqp.Table)
+	if !ok {
+		return 0
+	}
+
+	// count field tells us how many times this message was dead-lettered
+	count, ok := death["count"].(int64)
+	if !ok {
+		return 0
+	}
+
+	return int(count)
 }
