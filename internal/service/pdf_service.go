@@ -17,29 +17,29 @@ import (
 
 const maxQueueSize = 10000 // backpressure threshold
 
-type pdfService struct {
-	repo       repository.JobRepository
-	rmq        *queue.RabbitMQ
-	validator  *validator.Validator
-	logger     *slog.Logger
-	maxRetries int
-}
-
-func NewPDFService(
-	repo repository.JobRepository,
-	rmq *queue.RabbitMQ,
-	v *validator.Validator,
-	logger *slog.Logger,
-	maxRetries int,
-) PDFService {
-	return &pdfService{
-		repo:       repo,
-		rmq:        rmq,
-		validator:  v,
-		logger:     logger,
-		maxRetries: maxRetries,
+	type pdfService struct {
+		repo       repository.JobRepository
+		rmq        *queue.RabbitMQ
+		validator  *validator.Validator
+		logger     *slog.Logger
+		maxRetries int
 	}
-}
+
+	func NewPDFService(
+		repo repository.JobRepository,
+		rmq *queue.RabbitMQ,
+		v *validator.Validator,
+		logger *slog.Logger,
+		maxRetries int,
+	) PDFService {
+		return &pdfService{
+			repo:       repo,
+			rmq:        rmq,
+			validator:  v,
+			logger:     logger,
+			maxRetries: maxRetries,
+		}
+	}
 
 func (s *pdfService) CreateJob(ctx context.Context, userID string, req *domain.CreateJobRequest) (*domain.JobResponse, error) {
 	// Validate
