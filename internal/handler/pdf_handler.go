@@ -11,7 +11,7 @@ import (
 )
 
 type PDFHandler struct {
-	service PDFService // Uses LOCAL interface, NOT service.PDFService
+	service PDFService
 	logger  *slog.Logger
 }
 
@@ -62,8 +62,16 @@ func (h *PDFHandler) GetJobStatus(c *gin.Context) {
 
 func (h *PDFHandler) ListJobs(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit <= 0 {
+		limit = 20
+	}
+
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
 
 	resp, err := h.service.ListJobs(c.Request.Context(), userID.(string), limit, offset)
 	if err != nil {
@@ -76,6 +84,37 @@ func (h *PDFHandler) ListJobs(c *gin.Context) {
 		"limit":  limit,
 		"offset": offset,
 	})
+}
+
+func (h *PDFHandler) DownloadJob(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	jobID := c.Param("id")
+
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest,
+			domain.NewAPIError(http.StatusBadRequest, "job id is required"))
+		return
+	}
+
+	resp, err := h.service.GetJobStatus(c.Request.Context(), userID.(string), jobID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	if resp.Status != domain.JobStatusCompleted {
+		c.JSON(http.StatusBadRequest,
+			domain.NewAPIError(http.StatusBadRequest, "job is not completed yet"))
+		return
+	}
+
+	if resp.FilePath == nil || *resp.FilePath == "" {
+		c.JSON(http.StatusNotFound,
+			domain.NewAPIError(http.StatusNotFound, "pdf file not found"))
+		return
+	}
+
+	c.FileAttachment(*resp.FilePath, jobID+".pdf")
 }
 
 func (h *PDFHandler) handleError(c *gin.Context, err error) {

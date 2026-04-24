@@ -4,7 +4,6 @@ import (
 	"log/slog"
 
 	jwtpkg "github.com/jahapanah123/pdf_generator/internal/pkg/jwt"
-	"github.com/jahapanah123/pdf_generator/internal/service"
 	"github.com/jahapanah123/pdf_generator/internal/sse"
 )
 
@@ -16,7 +15,7 @@ type Handlers struct {
 }
 
 func NewHandlers(
-	pdfService service.PDFService,
+	pdfService PDFService,
 	broker *sse.Broker,
 	jwtManager *jwtpkg.Manager,
 	logger *slog.Logger,

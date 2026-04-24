@@ -75,7 +75,7 @@ services:
       rabbitmq:
         condition: service_healthy
     volumes:
-      - pdf_output:/app/output
+      - ./output:/app/output
     deploy:
       replicas: 2
       resources:

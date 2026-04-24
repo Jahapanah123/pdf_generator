@@ -45,7 +45,7 @@ func main() {
 	}
 	defer rmq.Close()
 
-	generator, err := pdf.NewGenerator(cfg.PDF.OutputDir, logger)
+	generator, err := pdf.NewGenerator(cfg.PDF.OutPutDir)
 	if err != nil {
 		logger.Error("create PDF generator", slog.Any("error", err))
 		os.Exit(1)
