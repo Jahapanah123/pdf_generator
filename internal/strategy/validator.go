@@ -6,11 +6,13 @@ import (
 	"github.com/jahapanah123/pdf_generator/internal/domain"
 )
 
+// PayloadValidator is the strategy interface
 type PayloadValidator interface {
 	Validate(data map[string]any) error
 	TemplateName() string
 }
 
+// ValidatorRegistry holds all validators
 type ValidatorRegistry struct {
 	validators map[string]PayloadValidator
 }
@@ -28,7 +30,7 @@ func (r *ValidatorRegistry) Register(validator PayloadValidator) {
 func (r *ValidatorRegistry) Validate(templateName string, data map[string]any) error {
 	validator, exists := r.validators[templateName]
 	if !exists {
-		return fmt.Errorf("%w: invalid template %s", domain.ErrInvalidInput, templateName)
+		return fmt.Errorf("%w: unknown template %s", domain.ErrInvalidInput, templateName)
 	}
 	return validator.Validate(data)
 }

@@ -1,4 +1,4 @@
-package service
+package handler
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"github.com/jahapanah123/pdf_generator/internal/domain"
 )
 
+// PDFService is defined by CONSUMER (handler), not producer
+// This follows Dependency Inversion Principle
 type PDFService interface {
 	CreateJob(ctx context.Context, userID string, req *domain.CreateJobRequest) (*domain.JobResponse, error)
 	GetJobStatus(ctx context.Context, userID, jobID string) (*domain.JobStatusResponse, error)

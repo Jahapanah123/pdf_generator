@@ -31,7 +31,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Postgres
 	pool, err := db.NewPostgresPool(ctx, cfg.DB, logger)
 	if err != nil {
 		logger.Error("connect postgres", slog.Any("error", err))
@@ -39,7 +38,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	// RabbitMQ
 	rmq, err := queue.NewRabbitMQ(cfg.RabbitMQ, logger)
 	if err != nil {
 		logger.Error("connect rabbitmq", slog.Any("error", err))
@@ -47,23 +45,18 @@ func main() {
 	}
 	defer rmq.Close()
 
-	// PDF-Generator
-	generator, err := pdf.NewGenerator(cfg.PDF.OutPutDir)
+	generator, err := pdf.NewGenerator(cfg.PDF.OutputDir, logger)
 	if err != nil {
 		logger.Error("create PDF generator", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	// Dependencies
 	jobRepo := postgres.NewJobRepository(pool)
 	processor := worker.NewPDFProcessor(jobRepo, rmq, generator, logger)
 
-	// Worker Pool
 	workerPool := worker.NewPool(
 		rmq, processor, jobRepo, logger,
-		cfg.Worker.Concurrency,
-		cfg.RabbitMQ.Prefetch,
-		cfg.Worker.MaxRetries,
+		cfg.Worker.Concurrency, cfg.RabbitMQ.Prefetch, cfg.Worker.MaxRetries,
 	)
 
 	if err := workerPool.Start(ctx); err != nil {
@@ -73,11 +66,8 @@ func main() {
 
 	logger.Info("worker pool running",
 		slog.Int("concurrency", cfg.Worker.Concurrency),
-		slog.Int("prefetch", cfg.RabbitMQ.Prefetch),
-		slog.Int("max_retries", cfg.Worker.MaxRetries),
 	)
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
