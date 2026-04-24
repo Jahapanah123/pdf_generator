@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: pdfGen
+      POSTGRES_DB: pdfgen
     ports:
       - "5432:5432"
     volumes:
@@ -75,7 +75,7 @@ services:
       rabbitmq:
         condition: service_healthy
     volumes:
-      - ./output:/app/output
+      - pdf_output:/app/output
     deploy:
       replicas: 2
       resources:

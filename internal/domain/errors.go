@@ -13,16 +13,13 @@ var (
 	ErrTokenExpired      = errors.New("token expired")
 	ErrTokenInvalid      = errors.New("token invalid")
 	ErrSSEMaxConnections = errors.New("max SSE connections reached")
-	ErrValidationFailed  = errors.New("validation failed")
 )
 
-// represents field level error
 type ValidationError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
 }
 
-// api errors
 type APIError struct {
 	Code    int               `json:"code"`
 	Message string            `json:"message"`

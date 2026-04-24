@@ -2,16 +2,15 @@ package worker
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
-
 	"github.com/jahapanah123/pdf_generator/internal/domain"
 	"github.com/jahapanah123/pdf_generator/internal/pkg/queue"
 	"github.com/jahapanah123/pdf_generator/internal/repository"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type Pool struct {
@@ -66,14 +65,13 @@ func (p *Pool) Start(ctx context.Context) error {
 }
 
 func (p *Pool) Stop() {
-	p.logger.Info("stopping worker pool")
+	p.logger.Info("stopping worker pool...")
 	p.wg.Wait()
 	p.logger.Info("worker pool stopped")
 }
 
 func (p *Pool) worker(ctx context.Context, id int, msgs <-chan amqp.Delivery) {
 	defer p.wg.Done()
-
 	p.logger.Info("worker started", slog.Int("worker_id", id))
 
 	for {
@@ -81,13 +79,11 @@ func (p *Pool) worker(ctx context.Context, id int, msgs <-chan amqp.Delivery) {
 		case <-ctx.Done():
 			p.logger.Info("worker shutting down", slog.Int("worker_id", id))
 			return
-
 		case msg, ok := <-msgs:
 			if !ok {
-				p.logger.Info("message channel closed", slog.Int("worker_id", id))
+				p.logger.Info("channel closed", slog.Int("worker_id", id))
 				return
 			}
-
 			p.processMessage(ctx, id, msg)
 		}
 	}
@@ -102,81 +98,99 @@ func (p *Pool) processMessage(ctx context.Context, workerID int, msg amqp.Delive
 			slog.Int("worker_id", workerID),
 			slog.Any("error", err),
 		)
-
+		// Malformed message — nack without requeue, DLX sends to DLQ
 		_ = msg.Nack(false, false)
 		return
 	}
 
-	retryCount := getRetryCount(msg)
-
-	p.logger.Info("processing job",
-		slog.Int("worker_id", workerID),
-		slog.String("job_id", jobMsg.JobID),
-		slog.Int("retry_attempt", retryCount),
-	)
-
 	if err := p.processor.Process(ctx, jobMsg); err != nil {
-		p.logger.Error("job processing failed",
+		p.logger.Error("process failed",
 			slog.Int("worker_id", workerID),
 			slog.String("job_id", jobMsg.JobID),
-			slog.Int("retry_attempt", retryCount),
+			slog.Int("retry_count", jobMsg.RetryCount),
 			slog.Any("error", err),
 			slog.Duration("duration", time.Since(start)),
 		)
 
-		if retryCount < p.maxRetries {
-			_ = msg.Nack(false, false)
-			return
-		}
-
-		errMsg := fmt.Sprintf("max retries (%d) exceeded: %v", p.maxRetries, err)
-
-		_ = p.repo.UpdateStatus(
-			ctx,
-			jobMsg.JobID,
-			domain.JobStatusFailed,
-			nil,
-			&errMsg,
-		)
-
+		// Ack current message — we handle retry/DLQ manually
 		_ = msg.Ack(false)
+
+		// Increment retry in DB
+		_ = p.repo.IncrementRetry(ctx, jobMsg.JobID)
+
+		nextRetry := jobMsg.RetryCount + 1
+
+		if nextRetry <= p.maxRetries {
+			// Send to delayed retry queue
+			jobMsg.RetryCount = nextRetry
+			retryBody, marshalErr := json.Marshal(jobMsg)
+			if marshalErr != nil {
+				p.logger.Error("marshal retry message failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", marshalErr),
+				)
+				errMsg := "failed to marshal retry message"
+				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+				return
+			}
+
+			if pubErr := p.rmq.PublishToRetry(ctx, nextRetry, retryBody); pubErr != nil {
+				p.logger.Error("publish to retry queue failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Int("retry_level", nextRetry),
+					slog.Any("error", pubErr),
+				)
+				errMsg := "failed to publish to retry queue: " + pubErr.Error()
+				_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+				return
+			}
+
+			p.logger.Info("job sent to retry queue",
+				slog.String("job_id", jobMsg.JobID),
+				slog.Int("retry_level", nextRetry),
+				slog.String("retry_queue", p.rmq.RetryQueueName(nextRetry)),
+			)
+		} else {
+			// All retries exhausted — send to DLQ explicitly + mark failed in DB
+			errMsg := "all retries exhausted: " + err.Error()
+			_ = p.repo.UpdateStatus(ctx, jobMsg.JobID, domain.JobStatusFailed, nil, &errMsg)
+
+			// Publish to DLQ so the message is preserved for inspection
+			dlqBody, marshalErr := json.Marshal(jobMsg)
+			if marshalErr != nil {
+				p.logger.Error("marshal DLQ message failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", marshalErr),
+				)
+				return
+			}
+
+			if dlqErr := p.rmq.PublishToDLQ(ctx, dlqBody); dlqErr != nil {
+				p.logger.Error("publish to DLQ failed",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Any("error", dlqErr),
+				)
+			} else {
+				p.logger.Warn("job sent to DLQ",
+					slog.String("job_id", jobMsg.JobID),
+					slog.Int("total_attempts", nextRetry),
+				)
+			}
+		}
 		return
 	}
 
+	// Success
 	if err := msg.Ack(false); err != nil {
 		p.logger.Error("ack failed",
 			slog.String("job_id", jobMsg.JobID),
 			slog.Any("error", err),
 		)
-		return
 	}
 
-	p.logger.Info("job completed successfully",
+	p.logger.Info("job done",
 		slog.Int("worker_id", workerID),
 		slog.String("job_id", jobMsg.JobID),
 		slog.Duration("duration", time.Since(start)),
 	)
-}
-
-func getRetryCount(msg amqp.Delivery) int {
-	if msg.Headers == nil {
-		return 0
-	}
-
-	deaths, ok := msg.Headers["x-death"].([]interface{})
-	if !ok || len(deaths) == 0 {
-		return 0
-	}
-
-	death, ok := deaths[0].(amqp.Table)
-	if !ok {
-		return 0
-	}
-
-	count, ok := death["count"].(int64)
-	if !ok {
-		return 0
-	}
-
-	return int(count)
 }

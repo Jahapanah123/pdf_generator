@@ -19,12 +19,15 @@ import (
 	"github.com/jahapanah123/pdf_generator/internal/router"
 	"github.com/jahapanah123/pdf_generator/internal/service"
 	"github.com/jahapanah123/pdf_generator/internal/sse"
-	"github.com/jahapanah123/pdf_generator/internal/strategy"
-	"github.com/jahapanah123/pdf_generator/internal/strategy/validators"
+	"github.com/jahapanah123/pdf_generator/internal/validator"
 )
 
 func main() {
-	logger := newLogger()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: true,
+	}))
+	slog.SetDefault(logger)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -35,6 +38,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Postgres
 	pool, err := db.NewPostgresPool(ctx, cfg.DB, logger)
 	if err != nil {
 		logger.Error("connect postgres", slog.Any("error", err))
@@ -42,6 +46,7 @@ func main() {
 	}
 	defer pool.Close()
 
+	// RabbitMQ
 	rmq, err := queue.NewRabbitMQ(cfg.RabbitMQ, logger)
 	if err != nil {
 		logger.Error("connect rabbitmq", slog.Any("error", err))
@@ -49,43 +54,28 @@ func main() {
 	}
 	defer rmq.Close()
 
+	// Dependencies
 	jobRepo := postgres.NewJobRepository(pool)
-
-	validatorRegistry := strategy.NewValidatorRegistry()
-	validatorRegistry.Register(validators.InvoiceValidator{})
-	validatorRegistry.Register(validators.ReportValidator{})
-
-	pdfService := service.NewPDFService(
-		jobRepo,
-		rmq,
-		validatorRegistry,
-		logger,
-		cfg.Worker.MaxRetries,
-	)
-
+	v := validator.New()
 	jwtManager := jwtpkg.NewManager(cfg.JWT)
 
-	broker := sse.NewBroker(
-		rmq,
-		logger,
-		cfg.SSE.MaxConnections,
-		cfg.SSE.ClientBuffer,
-	)
+	// Service (publishes directly to RabbitMQ — no feeder)
+	pdfSvc := service.NewPDFService(jobRepo, rmq, v, logger, cfg.Worker.MaxRetries)
 
+	// SSE Broker (consumes from RabbitMQ fanout exchange)
+	broker := sse.NewBroker(rmq, logger, cfg.SSE.MaxConnections, cfg.SSE.ClientBuffer)
 	if err := broker.Start(ctx); err != nil {
 		logger.Error("start SSE broker", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	handlers := handler.NewHandlers(
-		pdfService,
-		broker,
-		jwtManager,
-		logger,
-	)
+	// Handlers
+	handlers := handler.NewHandlers(pdfSvc, broker, jwtManager, logger)
 
+	// Router
 	r := router.Setup(handlers, jwtManager, cfg, logger)
 
+	// HTTP Server
 	srv := &http.Server{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port),
 		Handler:      r,
@@ -94,44 +84,20 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	startHTTPServer(srv, logger)
-	waitForShutdown(cancel, srv, logger)
-}
-
-func newLogger() *slog.Logger {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level:     slog.LevelInfo,
-		AddSource: true,
-	}))
-
-	slog.SetDefault(logger)
-	return logger
-}
-
-func startHTTPServer(srv *http.Server, logger *slog.Logger) {
 	go func() {
 		logger.Info("HTTP server starting", slog.String("addr", srv.Addr))
-
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", slog.Any("error", err))
 			os.Exit(1)
 		}
 	}()
-}
 
-func waitForShutdown(
-	cancel context.CancelFunc,
-	srv *http.Server,
-	logger *slog.Logger,
-) {
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(quit)
-
 	<-quit
 
-	logger.Info("shutting down")
-	cancel()
+	logger.Info("shutting down...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -140,5 +106,6 @@ func waitForShutdown(
 		logger.Error("forced shutdown", slog.Any("error", err))
 	}
 
+	cancel()
 	logger.Info("server stopped")
 }

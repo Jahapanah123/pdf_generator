@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -11,52 +12,47 @@ import (
 	"github.com/jahapanah123/pdf_generator/internal/domain"
 	"github.com/jahapanah123/pdf_generator/internal/pkg/queue"
 	"github.com/jahapanah123/pdf_generator/internal/repository"
-	"github.com/jahapanah123/pdf_generator/internal/strategy"
+	"github.com/jahapanah123/pdf_generator/internal/validator"
 )
 
-const maxQueueSize = 10000
+const maxQueueSize = 10000 // backpressure threshold
 
-type PDFService struct {
-	repo              repository.JobRepository
-	rmq               *queue.RabbitMQ // ✅ Direct dependency, no feeder
-	validatorRegistry *strategy.ValidatorRegistry
-	logger            *slog.Logger
-	maxRetries        int
+type pdfService struct {
+	repo       repository.JobRepository
+	rmq        *queue.RabbitMQ
+	validator  *validator.Validator
+	logger     *slog.Logger
+	maxRetries int
 }
 
 func NewPDFService(
 	repo repository.JobRepository,
 	rmq *queue.RabbitMQ,
-	validatorRegistry *strategy.ValidatorRegistry,
+	v *validator.Validator,
 	logger *slog.Logger,
 	maxRetries int,
-) *PDFService {
-	return &PDFService{
-		repo:              repo,
-		rmq:               rmq,
-		validatorRegistry: validatorRegistry,
-		logger:            logger,
-		maxRetries:        maxRetries,
+) PDFService {
+	return &pdfService{
+		repo:       repo,
+		rmq:        rmq,
+		validator:  v,
+		logger:     logger,
+		maxRetries: maxRetries,
 	}
 }
 
-func (s *PDFService) CreateJob(ctx context.Context, userID string, req *domain.CreateJobRequest) (*domain.JobResponse, error) {
+func (s *pdfService) CreateJob(ctx context.Context, userID string, req *domain.CreateJobRequest) (*domain.JobResponse, error) {
+	// Validate
+	if errs := s.validator.ValidateCreateJobRequest(req); errs != nil {
+		return nil, &validationErr{errors: errs}
+	}
+
 	// Backpressure check
 	size, err := s.rmq.QueueSize()
 	if err != nil {
 		s.logger.Warn("queue size check failed, proceeding", slog.Any("error", err))
 	} else if size >= maxQueueSize {
 		return nil, fmt.Errorf("%w: queue is full (%d messages)", domain.ErrQueueUnavailable, size)
-	}
-
-	// Validate payload
-	var data map[string]any
-	if err := json.Unmarshal(req.Payload, &data); err != nil {
-		return nil, fmt.Errorf("%w: invalid JSON payload", domain.ErrInvalidInput)
-	}
-
-	if err := s.validatorRegistry.Validate(req.TemplateName, data); err != nil {
-		return nil, err
 	}
 
 	now := time.Now()
@@ -75,15 +71,12 @@ func (s *PDFService) CreateJob(ctx context.Context, userID string, req *domain.C
 
 	// Persist to DB
 	if err := s.repo.Create(ctx, job); err != nil {
-		s.logger.Error("failed to create job in DB",
-			slog.String("job_id", jobID),
-			slog.Any("error", err),
-		)
-		return nil, fmt.Errorf("failed to create job: %w", err)
+		s.logger.Error("create job failed", slog.String("job_id", jobID), slog.Any("error", err))
+		return nil, fmt.Errorf("create job: %w", err)
 	}
 
-	// Publish to RabbitMQ directly (NO feeder)
-	jobMessage := &domain.JobMessage{
+	// Publish to RabbitMQ job queue
+	msg := &domain.JobMessage{
 		JobID:        jobID,
 		UserID:       userID,
 		TemplateName: req.TemplateName,
@@ -92,9 +85,9 @@ func (s *PDFService) CreateJob(ctx context.Context, userID string, req *domain.C
 		MaxRetries:   s.maxRetries,
 	}
 
-	body, err := json.Marshal(jobMessage)
+	body, err := json.Marshal(msg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal job message: %w", err)
+		return nil, fmt.Errorf("marshal job message: %w", err)
 	}
 
 	if err := s.rmq.PublishJob(ctx, body); err != nil {
@@ -116,12 +109,11 @@ func (s *PDFService) CreateJob(ctx context.Context, userID string, req *domain.C
 	}, nil
 }
 
-func (s *PDFService) GetJobStatus(ctx context.Context, userID, jobID string) (*domain.JobStatusResponse, error) {
+func (s *pdfService) GetJobStatus(ctx context.Context, userID, jobID string) (*domain.JobStatusResponse, error) {
 	job, err := s.repo.GetByID(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-
 	if job.UserID != userID {
 		return nil, domain.ErrForbidden
 	}
@@ -137,7 +129,7 @@ func (s *PDFService) GetJobStatus(ctx context.Context, userID, jobID string) (*d
 	}, nil
 }
 
-func (s *PDFService) ListJobs(ctx context.Context, userID string, limit, offset int) ([]*domain.JobStatusResponse, error) {
+func (s *pdfService) ListJobs(ctx context.Context, userID string, limit, offset int) ([]*domain.JobStatusResponse, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -147,7 +139,7 @@ func (s *PDFService) ListJobs(ctx context.Context, userID string, limit, offset 
 
 	jobs, err := s.repo.GetByUserID(ctx, userID, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list jobs: %w", err)
+		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 
 	responses := make([]*domain.JobStatusResponse, len(jobs))
@@ -162,6 +154,22 @@ func (s *PDFService) ListJobs(ctx context.Context, userID string, limit, offset 
 			CompletedAt:  job.CompletedAt,
 		}
 	}
-
 	return responses, nil
+}
+
+// --- validation error ---
+
+type validationErr struct {
+	errors []domain.ValidationError
+}
+
+func (e *validationErr) Error() string                              { return "validation failed" }
+func (e *validationErr) ValidationErrors() []domain.ValidationError { return e.errors }
+
+func IsValidationError(err error) ([]domain.ValidationError, bool) {
+	var ve *validationErr
+	if errors.As(err, &ve) {
+		return ve.ValidationErrors(), true
+	}
+	return nil, false
 }

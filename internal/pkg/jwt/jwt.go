@@ -35,13 +35,13 @@ func (m *Manager) GenerateTokenPair(userID, email string) (*TokenPair, error) {
 		UserID: userID,
 		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(m.cfg.AccessTokenExpiry)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.cfg.AccessTTL)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			Issuer:    "pdf-generator",
 		},
 	}
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).
-		SignedString([]byte(m.cfg.AccessTokenSecret))
+		SignedString([]byte(m.cfg.AccessSecret))
 	if err != nil {
 		return nil, fmt.Errorf("sign access token: %w", err)
 	}
@@ -50,13 +50,13 @@ func (m *Manager) GenerateTokenPair(userID, email string) (*TokenPair, error) {
 		UserID: userID,
 		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(m.cfg.RefreshTokenExpiry)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.cfg.RefreshTTL)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			Issuer:    "pdf-generator",
 		},
 	}
 	refreshToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims).
-		SignedString([]byte(m.cfg.RefreshTokenSecret))
+		SignedString([]byte(m.cfg.RefreshSecret))
 	if err != nil {
 		return nil, fmt.Errorf("sign refresh token: %w", err)
 	}
@@ -69,11 +69,11 @@ func (m *Manager) GenerateTokenPair(userID, email string) (*TokenPair, error) {
 }
 
 func (m *Manager) ValidateAccessToken(tokenStr string) (*Claims, error) {
-	return m.validate(tokenStr, m.cfg.AccessTokenSecret)
+	return m.validate(tokenStr, m.cfg.AccessSecret)
 }
 
 func (m *Manager) ValidateRefreshToken(tokenStr string) (*Claims, error) {
-	return m.validate(tokenStr, m.cfg.RefreshTokenSecret)
+	return m.validate(tokenStr, m.cfg.RefreshSecret)
 }
 
 func (m *Manager) validate(tokenStr, secret string) (*Claims, error) {
