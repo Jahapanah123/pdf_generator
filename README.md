@@ -92,8 +92,8 @@ docker-compose up --build
 
 ##  Future Improvements
 Kubernetes deployment
+CI/CD pipeline
 Monitoring with Prometheus & Grafana
-Rate limiting
 Distributed tracing
 
 
